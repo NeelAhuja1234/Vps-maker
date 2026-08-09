@@ -1,12 +1,10 @@
 #!/bin/bash
 
+set -o pipefail
+
 # =========================================================
 #                 NEELCRAFT VPS MAKER
 # =========================================================
-
-set -o pipefail
-
-# ---------------- COLORS ----------------
 
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -16,17 +14,16 @@ CYAN='\033[1;36m'
 WHITE='\033[1;37m'
 RESET='\033[0m'
 
-# ---------------- SETTINGS ----------------
-
 VM_DIR="/var/lib/neelcraft-vps"
 IMAGE_DIR="$VM_DIR/images"
 DISK_DIR="$VM_DIR/disks"
+CLOUD_DIR="$VM_DIR/cloud-init"
 
 UBUNTU_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 UBUNTU_IMAGE="$IMAGE_DIR/ubuntu-24.04.img"
 
 # =========================================================
-#                    BASIC FUNCTIONS
+# BASIC
 # =========================================================
 
 line() {
@@ -38,13 +35,8 @@ pause_screen() {
     read -rp "Press Enter to continue..."
 }
 
-clear_screen() {
-    clear
-}
-
 banner() {
     clear
-
     echo -e "${CYAN}"
     cat <<'EOF'
 ███╗   ██╗███████╗███████╗██╗      ██████╗██████╗  █████╗ ███████╗████████╗
@@ -55,36 +47,31 @@ banner() {
 ╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝
 EOF
     echo -e "${RESET}"
-
     echo -e "${WHITE}                 VPS MAKER${RESET}"
     echo -e "${CYAN}                 NEELCRAFT${RESET}"
     echo
 }
 
 root_check() {
-
     if [ "$(id -u)" != "0" ]; then
         echo -e "${RED}✗ Please run this script as root.${RESET}"
         exit 1
     fi
 }
 
-command_check() {
-
-    if ! command -v "$1" >/dev/null 2>&1; then
-        return 1
-    fi
-
-    return 0
+prepare_dirs() {
+    mkdir -p "$IMAGE_DIR"
+    mkdir -p "$DISK_DIR"
+    mkdir -p "$CLOUD_DIR"
 }
 
 # =========================================================
-#                  DEPENDENCY INSTALL
+# DEPENDENCIES
 # =========================================================
 
 install_dependencies() {
 
-    echo -e "${GREEN}[+] Installing VPS Maker dependencies...${RESET}"
+    echo -e "${GREEN}[+] Installing dependencies...${RESET}"
     echo
 
     export DEBIAN_FRONTEND=noninteractive
@@ -107,41 +94,35 @@ install_dependencies() {
 
     systemctl enable --now libvirtd 2>/dev/null || true
 
-    mkdir -p "$IMAGE_DIR"
-    mkdir -p "$DISK_DIR"
+    prepare_dirs
 
     echo
     echo -e "${GREEN}✓ Dependencies installed.${RESET}"
 }
 
 # =========================================================
-#                     KVM CHECK
+# KVM CHECK
 # =========================================================
 
 check_kvm() {
-
-    if [ -e /dev/kvm ]; then
-        return 0
-    fi
-
-    return 1
+    [ -e /dev/kvm ]
 }
 
 # =========================================================
-#                  DOWNLOAD IMAGE
+# IMAGE
 # =========================================================
 
 download_image() {
 
-    mkdir -p "$IMAGE_DIR"
+    prepare_dirs
 
     if [ -f "$UBUNTU_IMAGE" ]; then
-        echo -e "${GREEN}✓ Ubuntu image already exists.${RESET}"
+        echo -e "${GREEN}✓ Ubuntu 24.04 image already exists.${RESET}"
         return 0
     fi
 
     echo
-    echo -e "${YELLOW}[+] Downloading Ubuntu 24.04 cloud image...${RESET}"
+    echo -e "${YELLOW}[+] Downloading Ubuntu 24.04 image...${RESET}"
     echo
 
     curl -L \
@@ -152,14 +133,15 @@ download_image() {
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}✗ Image download failed.${RESET}"
+        rm -f "$UBUNTU_IMAGE"
         return 1
     fi
 
-    echo -e "${GREEN}✓ Ubuntu image downloaded.${RESET}"
+    echo -e "${GREEN}✓ Image downloaded.${RESET}"
 }
 
 # =========================================================
-#                 VM INPUT FUNCTION
+# VM DETAILS
 # =========================================================
 
 get_vm_details() {
@@ -174,56 +156,63 @@ get_vm_details() {
     read -rp "RAM (MB)      : " VM_RAM
     read -rp "CPU Cores     : " VM_CPU
     read -rp "Disk (GB)     : " VM_DISK
-    read -rp "SSH Port      : " VM_SSH_PORT
 
     if [ -z "$VM_NAME" ]; then
         echo -e "${RED}✗ VM name cannot be empty.${RESET}"
         return 1
     fi
 
-    if [ -z "$VM_RAM" ]; then
-        VM_RAM="2048"
+    if [[ ! "$VM_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo -e "${RED}✗ Invalid VM name.${RESET}"
+        return 1
     fi
 
-    if [ -z "$VM_CPU" ]; then
-        VM_CPU="2"
-    fi
+    VM_RAM="${VM_RAM:-2048}"
+    VM_CPU="${VM_CPU:-2}"
+    VM_DISK="${VM_DISK:-20}"
 
-    if [ -z "$VM_DISK" ]; then
-        VM_DISK="20"
-    fi
-
-    if [ -z "$VM_SSH_PORT" ]; then
-        VM_SSH_PORT="2222"
+    if ! [[ "$VM_RAM" =~ ^[0-9]+$ &&
+            "$VM_CPU" =~ ^[0-9]+$ &&
+            "$VM_DISK" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}✗ RAM/CPU/Disk must be numbers.${RESET}"
+        return 1
     fi
 
     VM_DISK_PATH="$DISK_DIR/${VM_NAME}.qcow2"
+    VM_CLOUD_DIR="$CLOUD_DIR/$VM_NAME"
 
     echo
     echo -e "${GREEN}VM Name:${RESET} $VM_NAME"
-    echo -e "${GREEN}RAM:${RESET} ${VM_RAM}MB"
+    echo -e "${GREEN}RAM:${RESET} ${VM_RAM} MB"
     echo -e "${GREEN}CPU:${RESET} ${VM_CPU}"
-    echo -e "${GREEN}Disk:${RESET} ${VM_DISK}GB"
-    echo -e "${GREEN}SSH Port:${RESET} ${VM_SSH_PORT}"
+    echo -e "${GREEN}Disk:${RESET} ${VM_DISK} GB"
     echo
 }
 
 # =========================================================
-#                  CREATE DISK
+# PASSWORD
+# =========================================================
+
+get_vm_password() {
+
+    echo
+    read -rsp "VM Root Password : " VM_PASSWORD
+    echo
+
+    if [ -z "$VM_PASSWORD" ]; then
+        echo -e "${RED}✗ Password cannot be empty.${RESET}"
+        return 1
+    fi
+}
+
+# =========================================================
+# DISK
 # =========================================================
 
 create_disk() {
 
     if [ -f "$VM_DISK_PATH" ]; then
-
         echo -e "${YELLOW}⚠ Disk already exists.${RESET}"
-
-        read -rp "Use existing disk? [Y/n]: " USE_EXISTING
-
-        if [[ "$USE_EXISTING" =~ ^[Nn]$ ]]; then
-            return 1
-        fi
-
         return 0
     fi
 
@@ -246,25 +235,14 @@ create_disk() {
 }
 
 # =========================================================
-#                    CLOUD INIT
+# CLOUD INIT
 # =========================================================
 
 create_cloud_init() {
 
-    CLOUD_DIR="$VM_DIR/cloud-init/$VM_NAME"
+    mkdir -p "$VM_CLOUD_DIR"
 
-    mkdir -p "$CLOUD_DIR"
-
-    echo
-    read -rsp "VM Password: " VM_PASSWORD
-    echo
-
-    if [ -z "$VM_PASSWORD" ]; then
-        echo -e "${RED}✗ Password cannot be empty.${RESET}"
-        return 1
-    fi
-
-    cat > "$CLOUD_DIR/user-data" <<EOF
+    cat > "$VM_CLOUD_DIR/user-data" <<EOF
 #cloud-config
 
 hostname: ${VM_NAME}
@@ -288,21 +266,52 @@ runcmd:
   - systemctl restart ssh
 EOF
 
-    cat > "$CLOUD_DIR/meta-data" <<EOF
+    cat > "$VM_CLOUD_DIR/meta-data" <<EOF
 instance-id: ${VM_NAME}
 local-hostname: ${VM_NAME}
 EOF
 
     cloud-localds \
-        "$CLOUD_DIR/seed.iso" \
-        "$CLOUD_DIR/user-data" \
-        "$CLOUD_DIR/meta-data"
+        "$VM_CLOUD_DIR/seed.iso" \
+        "$VM_CLOUD_DIR/user-data" \
+        "$VM_CLOUD_DIR/meta-data"
 
-    echo -e "${GREEN}✓ Cloud-init created.${RESET}"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Cloud-init creation failed.${RESET}"
+        return 1
+    fi
+
+    echo -e "${GREEN}✓ Cloud-init configured.${RESET}"
 }
 
 # =========================================================
-#                     CREATE KVM VM
+# VM IP
+# =========================================================
+
+get_vm_ip() {
+
+    local IP=""
+
+    for i in {1..30}; do
+
+        IP=$(virsh domifaddr "$VM_NAME" 2>/dev/null |
+            awk '/ipv4/ {print $4}' |
+            cut -d/ -f1 |
+            head -n1)
+
+        if [ -n "$IP" ]; then
+            echo "$IP"
+            return 0
+        fi
+
+        sleep 2
+    done
+
+    return 1
+}
+
+# =========================================================
+# CREATE KVM
 # =========================================================
 
 create_kvm_vm() {
@@ -310,11 +319,9 @@ create_kvm_vm() {
     banner
 
     if ! check_kvm; then
-
-        echo -e "${RED}✗ /dev/kvm is not available.${RESET}"
+        echo -e "${RED}✗ KVM is not available on this VPS.${RESET}"
         echo
-        echo "KVM cannot be used on this VPS."
-        echo "Use option 3 for the No-KVM mode."
+        echo "Use No-KVM mode instead."
         pause_screen
         return
     fi
@@ -327,12 +334,15 @@ create_kvm_vm() {
     }
 
     if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-
-        echo
-        echo -e "${YELLOW}⚠ A VM named '$VM_NAME' already exists.${RESET}"
+        echo -e "${RED}✗ VM '$VM_NAME' already exists.${RESET}"
         pause_screen
         return
     fi
+
+    get_vm_password || {
+        pause_screen
+        return
+    }
 
     download_image || {
         pause_screen
@@ -350,7 +360,7 @@ create_kvm_vm() {
     }
 
     echo
-    echo -e "${GREEN}[+] Creating KVM virtual machine...${RESET}"
+    echo -e "${GREEN}[+] Creating KVM VM...${RESET}"
     echo
 
     virt-install \
@@ -358,7 +368,7 @@ create_kvm_vm() {
         --memory "$VM_RAM" \
         --vcpus "$VM_CPU" \
         --disk path="$VM_DISK_PATH",format=qcow2 \
-        --disk path="$VM_DIR/cloud-init/$VM_NAME/seed.iso",device=cdrom \
+        --disk path="$VM_CLOUD_DIR/seed.iso",device=cdrom \
         --os-variant ubuntu24.04 \
         --network network=default,model=virtio \
         --graphics none \
@@ -373,33 +383,52 @@ create_kvm_vm() {
     fi
 
     echo
-    echo -e "${GREEN}✓ KVM VM created successfully.${RESET}"
+    echo -e "${GREEN}✓ VM created successfully.${RESET}"
+    echo
+    echo "Waiting for VM IP..."
+
+    VM_IP=$(get_vm_ip)
 
     echo
-    echo -e "${CYAN}VM Information${RESET}"
+    line
+    echo -e "${GREEN}             VM CREATED${RESET}"
+    line
+    echo
     echo "Name       : $VM_NAME"
-    echo "RAM        : ${VM_RAM}MB"
+    echo "RAM        : ${VM_RAM} MB"
     echo "CPU        : $VM_CPU"
-    echo "Disk       : ${VM_DISK}GB"
-    echo
+    echo "Disk       : ${VM_DISK} GB"
+    echo "Status     : $(virsh domstate "$VM_NAME")"
 
-    virsh dominfo "$VM_NAME" | grep -E "Name|State|CPU|Max memory"
+    if [ -n "$VM_IP" ]; then
+        echo "IP         : $VM_IP"
+        echo
+        echo "SSH:"
+        echo "ssh root@$VM_IP"
+    else
+        echo
+        echo -e "${YELLOW}⚠ IP not detected yet.${RESET}"
+        echo "Run VM Info later to check it."
+    fi
+
+    echo
+    line
 
     pause_screen
 }
 
 # =========================================================
-#                 NO KVM / TCG MODE
+# NO KVM
 # =========================================================
 
 create_no_kvm_vm() {
 
     banner
 
-    echo -e "${YELLOW}NO-KVM MODE${RESET}"
+    echo -e "${YELLOW}                 NO-KVM MODE${RESET}"
     echo
-    echo "This mode uses QEMU software emulation."
-    echo "Performance will be significantly slower than KVM."
+    echo "QEMU software emulation will be used."
+    echo "Performance is lower than hardware KVM."
     echo
 
     get_vm_details || {
@@ -408,11 +437,15 @@ create_no_kvm_vm() {
     }
 
     if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-
         echo -e "${RED}✗ VM already exists.${RESET}"
         pause_screen
         return
     fi
+
+    get_vm_password || {
+        pause_screen
+        return
+    }
 
     download_image || {
         pause_screen
@@ -430,15 +463,14 @@ create_no_kvm_vm() {
     }
 
     echo
-    echo -e "${GREEN}[+] Creating software-emulated VM...${RESET}"
-    echo
+    echo -e "${GREEN}[+] Creating No-KVM VM...${RESET}"
 
     virt-install \
         --name "$VM_NAME" \
         --memory "$VM_RAM" \
         --vcpus "$VM_CPU" \
         --disk path="$VM_DISK_PATH",format=qcow2 \
-        --disk path="$VM_DIR/cloud-init/$VM_NAME/seed.iso",device=cdrom \
+        --disk path="$VM_CLOUD_DIR/seed.iso",device=cdrom \
         --os-variant ubuntu24.04 \
         --network network=default,model=virtio \
         --graphics none \
@@ -455,12 +487,201 @@ create_no_kvm_vm() {
 
     echo
     echo -e "${GREEN}✓ No-KVM VM created.${RESET}"
+    pause_screen
+}
+
+# =========================================================
+# VM MANAGEMENT
+# =========================================================
+
+list_vms() {
+
+    banner
+
+    echo -e "${WHITE}                    VM LIST${RESET}"
+    line
+    echo
+
+    if ! virsh list --all; then
+        echo -e "${RED}Unable to list VMs.${RESET}"
+    fi
+
+    echo
+    pause_screen
+}
+
+choose_vm() {
+
+    read -rp "VM Name: " SELECTED_VM
+
+    if [ -z "$SELECTED_VM" ]; then
+        echo -e "${RED}✗ VM name required.${RESET}"
+        return 1
+    fi
+
+    if ! virsh dominfo "$SELECTED_VM" >/dev/null 2>&1; then
+        echo -e "${RED}✗ VM not found.${RESET}"
+        return 1
+    fi
+
+    return 0
+}
+
+start_vm() {
+
+    banner
+    echo -e "${GREEN}START VM${RESET}"
+    line
+    echo
+
+    choose_vm || {
+        pause_screen
+        return
+    }
+
+    virsh start "$SELECTED_VM"
+
+    pause_screen
+}
+
+stop_vm() {
+
+    banner
+    echo -e "${YELLOW}STOP VM${RESET}"
+    line
+    echo
+
+    choose_vm || {
+        pause_screen
+        return
+    }
+
+    virsh shutdown "$SELECTED_VM"
+
+    pause_screen
+}
+
+restart_vm() {
+
+    banner
+    echo -e "${BLUE}RESTART VM${RESET}"
+    line
+    echo
+
+    choose_vm || {
+        pause_screen
+        return
+    }
+
+    virsh reboot "$SELECTED_VM"
+
+    pause_screen
+}
+
+delete_vm() {
+
+    banner
+    echo -e "${RED}DELETE VM${RESET}"
+    line
+    echo
+
+    choose_vm || {
+        pause_screen
+        return
+    }
+
+    echo
+    echo -e "${RED}WARNING: This will permanently delete the VM.${RESET}"
+    read -rp "Type DELETE to continue: " CONFIRM
+
+    if [ "$CONFIRM" != "DELETE" ]; then
+        echo "Cancelled."
+        pause_screen
+        return
+    fi
+
+    virsh destroy "$SELECTED_VM" 2>/dev/null || true
+    virsh undefine "$SELECTED_VM" --remove-all-storage 2>/dev/null || true
+
+    rm -rf "$CLOUD_DIR/$SELECTED_VM"
+
+    echo
+    echo -e "${GREEN}✓ VM deleted.${RESET}"
+
+    pause_screen
+}
+
+vm_info() {
+
+    banner
+    echo -e "${CYAN}VM INFO${RESET}"
+    line
+    echo
+
+    choose_vm || {
+        pause_screen
+        return
+    }
+
+    echo
+    virsh dominfo "$SELECTED_VM"
+
+    echo
+    echo "Network:"
+    virsh domifaddr "$SELECTED_VM" 2>/dev/null || true
 
     pause_screen
 }
 
 # =========================================================
-#                      RDX TOOL
+# VM MANAGEMENT MENU
+# =========================================================
+
+vm_management() {
+
+    while true; do
+
+        banner
+
+        echo -e "${WHITE}                 VM MANAGEMENT${RESET}"
+        line
+        echo
+
+        echo -e "${GREEN}[1]${RESET} List VMs"
+        echo
+        echo -e "${GREEN}[2]${RESET} Start VM"
+        echo
+        echo -e "${YELLOW}[3]${RESET} Stop VM"
+        echo
+        echo -e "${BLUE}[4]${RESET} Restart VM"
+        echo
+        echo -e "${RED}[5]${RESET} Delete VM"
+        echo
+        echo -e "${CYAN}[6]${RESET} VM Info"
+        echo
+        echo -e "${WHITE}[7]${RESET} Back"
+
+        echo
+        line
+
+        read -rp "Select Option → " OPTION
+
+        case "$OPTION" in
+            1) list_vms ;;
+            2) start_vm ;;
+            3) stop_vm ;;
+            4) restart_vm ;;
+            5) delete_vm ;;
+            6) vm_info ;;
+            7) return ;;
+            *) echo -e "${RED}✗ Invalid option.${RESET}"; sleep 1 ;;
+        esac
+
+    done
+}
+
+# =========================================================
+# RDX TOOL
 # =========================================================
 
 rdx_tool() {
@@ -473,31 +694,34 @@ rdx_tool() {
 
     echo -e "${YELLOW}RDX Tool is not connected yet.${RESET}"
     echo
-    echo "Put your existing RDX command/script inside this function."
+    echo "Add your RDX GitHub raw URL inside this function."
     echo
 
     # Example:
-    #
-    # bash <(curl -fsSL YOUR_RDX_RAW_GITHUB_URL)
+    # bash <(curl -fsSL "https://raw.githubusercontent.com/USERNAME/REPO/main/install.sh")
 
     pause_screen
 }
 
 # =========================================================
-#                    ALL SETUP
+# ALL SETUP
 # =========================================================
 
 all_setup() {
 
     banner
 
-    echo -e "${WHITE}                 ALL SETUP${RESET}"
+    echo -e "${WHITE}                  ALL SETUP${RESET}"
     line
     echo
 
-    echo "[1] Installing dependencies"
-    echo "[2] Checking KVM"
-    echo "[3] Preparing VM environment"
+    echo "This will install:"
+    echo
+    echo " • QEMU"
+    echo " • KVM/libvirt"
+    echo " • virt-install"
+    echo " • cloud-init tools"
+    echo " • Networking dependencies"
     echo
 
     read -rp "Continue? [Y/n]: " CONFIRM
@@ -512,9 +736,8 @@ all_setup() {
     line
 
     if check_kvm; then
-
         echo
-        echo -e "${GREEN}✓ KVM is available.${RESET}"
+        echo -e "${GREEN}✓ Hardware KVM is available.${RESET}"
         echo
 
         read -rp "Create a KVM VM now? [Y/n]: " CREATE_VM
@@ -525,19 +748,17 @@ all_setup() {
         fi
 
     else
-
         echo
-        echo -e "${YELLOW}⚠ KVM is not available.${RESET}"
-        echo "No-KVM mode can be used."
+        echo -e "${YELLOW}⚠ /dev/kvm is unavailable.${RESET}"
         echo
-
+        echo "You can use No-KVM mode from the main menu."
     fi
 
     pause_screen
 }
 
 # =========================================================
-#                     VPS MENU
+# MAIN VPS MENU
 # =========================================================
 
 vps_menu() {
@@ -547,7 +768,7 @@ vps_menu() {
         banner
 
         echo -e "${CYAN}┌──────────────────────────────────────────┐${RESET}"
-        echo -e "${CYAN}│             DEVELOPMENT MENU             │${RESET}"
+        echo -e "${CYAN}│               VPS MAKER                  │${RESET}"
         echo -e "${CYAN}└──────────────────────────────────────────┘${RESET}"
         echo
 
@@ -559,7 +780,9 @@ vps_menu() {
         echo
         echo -e "${CYAN}[4]${RESET} Run VM 3 - ALL SETUP"
         echo
-        echo -e "${RED}[5]${RESET} Exit"
+        echo -e "${WHITE}[5]${RESET} VM Management"
+        echo
+        echo -e "${RED}[6]${RESET} Exit"
 
         echo
         line
@@ -585,12 +808,15 @@ vps_menu() {
                 ;;
 
             5)
+                vm_management
+                ;;
+
+            6)
                 clear
                 exit 0
                 ;;
 
             *)
-                echo
                 echo -e "${RED}✗ Invalid option.${RESET}"
                 sleep 1
                 ;;
@@ -601,8 +827,9 @@ vps_menu() {
 }
 
 # =========================================================
-#                         START
+# START
 # =========================================================
 
 root_check
+prepare_dirs
 vps_menu
